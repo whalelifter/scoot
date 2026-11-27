@@ -40,6 +40,7 @@ body { -webkit-font-smoothing: antialiased; }
   cursor: grab;
 }
 #globe.hovering { cursor: pointer; }
+#globe.picking { cursor: crosshair; }
 #globe:active { cursor: grabbing; }
 
 h1, h2, p { margin: 0; }
@@ -146,6 +147,7 @@ svg { stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round
 .kv > div { display: flex; justify-content: space-between; gap: 12px; }
 .kv dt { color: var(--text-2); }
 .kv dd { margin: 0; font-variant-numeric: tabular-nums; text-align: right; }
+.data-note { margin-top: 10px; font-size: 12px; color: var(--warning); }
 
 /* ---------- Legend ---------- */
 
@@ -364,6 +366,7 @@ svg { stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round
   border: 1px solid rgba(251, 179, 21, 0.45);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
 }
+.pick-banner { z-index: 31; border-color: rgba(51, 140, 237, 0.7); }
 
 .loader {
   position: fixed;
@@ -399,7 +402,7 @@ svg { stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round
 }
 
 @media (max-width: 760px) {
-  :root { --gutter: 10px; font-size: 13px; }
+  :root { --gutter: 16px; font-size: 13px; }
   .hud {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr) auto;
@@ -411,7 +414,9 @@ svg { stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round
   .col-left .legend { grid-column: 1 / -1; }
   .brand { display: flex; align-items: center; padding: 8px 12px; }
   .brand-row { width: 100%; }
-  .brand h1 { font-size: 15px; }
+  .brand h1 { font-size: 15px; white-space: nowrap; }
+  .brand .badge { padding: 2px 7px; font-size: 10px; gap: 5px; }
+  .wide-only { display: none; }
   .brand .sub { display: none; }
   .stats { display: flex; align-items: center; padding: 8px 12px; }
   .hero { margin: 0; gap: 5px; }
@@ -421,7 +426,16 @@ svg { stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round
 
   .legend { padding: 5px; }
   .legend h2, .legend .hint, .legend-detail { display: none; }
-  .legend-list { margin: 0; display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+  .legend-list {
+    margin: 0;
+    display: flex;
+    gap: 2px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    /* Fade the right edge so it's clear the chips scroll sideways. */
+    -webkit-mask-image: linear-gradient(to right, #000 82%, transparent);
+    mask-image: linear-gradient(to right, #000 82%, transparent);
+  }
   .legend-list::-webkit-scrollbar { display: none; }
   .legend-item { display: flex; gap: 6px; width: auto; padding: 5px 8px; white-space: nowrap; }
   .legend-count { color: var(--text-2); }
@@ -446,11 +460,12 @@ svg { stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round
   .bottom > .timebar { flex: 1 1 0; min-width: 0; justify-content: space-between; flex-wrap: wrap; padding: 4px; }
   .observer:has(#observer-stats:not([hidden])) { flex-basis: 100%; }
   .locate-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-  #btn-locate { padding: 8px 10px; }
+  #btn-locate { padding: 6px 8px; }
   .observer-stats { flex: 1; min-width: 0; gap: 2px 10px; font-size: 12px; }
   .obs-num { font-size: 14px; }
   #obs-highest { flex-basis: 100%; font-size: 12px; }
   .sim-date { display: none; }
-  .sim-time { min-width: 0; padding: 0 4px; font-size: 12px; }
-  .speeds button { min-width: 0; padding: 5px 7px; }
+  .sim-time { min-width: 0; padding: 0 2px; font-size: 11px; }
+  .speeds button { min-width: 0; padding: 4px 6px; font-size: 12px; }
+  .timebar { gap: 4px; }
 }

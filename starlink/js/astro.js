@@ -57,25 +57,79 @@ export function surfaceVector(latDeg, lonDeg, radius = 1) {
 // Colour groups. Only three hues plus a neutral grey are used so every pair stays distinguishable,
 // including for colour-blind viewers; the finer shell name is shown in the tooltip and info card.
 export const GROUPS = [
-  { key: 'mid53', label: '53° shells', color: '#338ced', detail: 'The original and largest shells' },
-  { key: 'mid43', label: '43° shell', color: '#e76624', detail: 'Mid-latitude Gen2 shell' },
+  { key: 'mid53', label: '53° shells', color: '#338ced', detail: 'The largest group of shells' },
+  { key: 'mid43', label: '43° shells', color: '#e76624', detail: 'Mid-latitude shells' },
   { key: 'polar', label: 'Polar shells', color: '#00a888', detail: '70° and 97.6° orbits' },
-  { key: 'other', label: 'Other orbits', color: '#8f98ab', detail: '33° shell, orbit raising, deorbiting' },
+  { key: 'other', label: 'Other orbits', color: '#8f98ab', detail: 'Low-inclination shell, and satellites raising or lowering their orbit' },
 ];
 
-/** Altitude below which a Starlink is climbing to, or descending from, its operational shell. */
-export const TRANSIT_ALTITUDE_KM = 420;
+const FAMILIES = [
+  { name: '53°', min: 52, max: 54.5, group: 0 },
+  { name: '43°', min: 42, max: 44.5, group: 1 },
+  { name: '70°', min: 69, max: 71, group: 2 },
+  { name: '97.6°', min: 96, max: 99.5, group: 2 },
+  { name: '33°', min: 30, max: 34.5, group: 3 },
+];
+const BIN_KM = 5;
+const SHELL_HALF_WIDTH_KM = 10;
 
-/** Sorts a satellite into a colour group and a human-readable shell name. */
-export function classify(inclinationDeg, meanAltitudeKm) {
-  const inc = inclinationDeg;
-  if (!(meanAltitudeKm >= TRANSIT_ALTITUDE_KM)) {
-    return { group: 3, shell: 'Orbit raising or deorbiting' };
+/**
+ * Sorts every satellite into a colour group and names its shell. Shells aren't hard-coded: SpaceX
+ * moves them (most were lowered from ~550 km to ~480 km in 2026), so for each inclination family the
+ * densely populated altitude bands count as shells, and anything outside them is raising or lowering.
+ *
+ * @returns {{group: Uint8Array, shell: string[], shells: {family: string, group: number, altitude: number, count: number}[]}}
+ */
+export function classifyAll(inclination, meanAltitude) {
+  const n = inclination.length;
+  const family = new Int8Array(n).fill(-1);
+  const bins = FAMILIES.map(() => new Map());
+  const totals = FAMILIES.map(() => 0);
+  for (let i = 0; i < n; i++) {
+    const f = FAMILIES.findIndex((fam) => inclination[i] >= fam.min && inclination[i] <= fam.max);
+    if (f < 0 || !Number.isFinite(meanAltitude[i])) continue;
+    family[i] = f;
+    totals[f]++;
+    const bin = Math.floor(meanAltitude[i] / BIN_KM);
+    bins[f].set(bin, (bins[f].get(bin) || 0) + 1);
   }
-  if (inc >= 52 && inc <= 54.5) return { group: 0, shell: `53° shell` };
-  if (inc >= 42 && inc <= 44.5) return { group: 1, shell: '43° shell' };
-  if (inc >= 69 && inc <= 71) return { group: 2, shell: '70° polar shell' };
-  if (inc >= 96 && inc <= 99.5) return { group: 2, shell: '97.6° sun-synchronous shell' };
-  if (inc >= 32 && inc <= 34.5) return { group: 3, shell: '33° shell' };
-  return { group: 3, shell: 'Non-standard orbit' };
+
+  // Dense bins (≥ 5% of the family, and at least 30 satellites), merged when within 10 km.
+  const shellsByFamily = FAMILIES.map((fam, f) => {
+    const threshold = Math.max(30, totals[f] * 0.05);
+    const dense = [...bins[f]].filter(([, c]) => c >= threshold).sort((a, b) => a[0] - b[0]);
+    const shells = [];
+    for (const [bin, count] of dense) {
+      const centre = (bin + 0.5) * BIN_KM;
+      const last = shells[shells.length - 1];
+      if (last && centre - last.hi <= 2 * BIN_KM) {
+        last.hi = centre;
+        last.sum += centre * count;
+        last.count += count;
+      } else {
+        shells.push({ lo: centre, hi: centre, sum: centre * count, count });
+      }
+    }
+    return shells.map((s) => ({ ...s, altitude: Math.round(s.sum / s.count / 10) * 10 }));
+  });
+
+  const group = new Uint8Array(n).fill(3);
+  const shell = new Array(n).fill('Non-standard orbit');
+  for (let i = 0; i < n; i++) {
+    const f = family[i];
+    if (f < 0) continue;
+    const a = meanAltitude[i];
+    const match = shellsByFamily[f].find((s) => a >= s.lo - SHELL_HALF_WIDTH_KM && a <= s.hi + SHELL_HALF_WIDTH_KM);
+    if (match) {
+      group[i] = FAMILIES[f].group;
+      shell[i] = `${FAMILIES[f].name} shell at ~${match.altitude} km`;
+    } else {
+      shell[i] = `${FAMILIES[f].name}, raising or lowering orbit`;
+    }
+  }
+
+  const shells = shellsByFamily.flatMap((list, f) =>
+    list.map((s) => ({ family: FAMILIES[f].name, group: FAMILIES[f].group, altitude: s.altitude, count: s.count })),
+  );
+  return { group, shell, shells };
 }

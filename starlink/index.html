@@ -37,7 +37,7 @@
       <section class="panel stats" aria-label="Constellation statistics">
         <div class="hero">
           <span id="stat-count" class="hero-num">—</span>
-          <span class="hero-label">satellites tracked</span>
+          <span class="hero-label">satellites<span class="wide-only"> tracked</span></span>
         </div>
         <dl class="kv">
           <div><dt>In sunlight</dt><dd id="stat-sunlit">—</dd></div>
@@ -45,6 +45,7 @@
           <div><dt>Mean altitude</dt><dd id="stat-alt">—</dd></div>
           <div><dt>Elements updated</dt><dd id="stat-data">—</dd></div>
         </dl>
+        <p id="data-note" class="data-note" hidden></p>
       </section>
 
       <section class="panel legend" aria-labelledby="legend-title">
@@ -134,6 +135,11 @@
     <button id="toast-close" class="icon-btn" type="button" aria-label="Dismiss">
       <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15"/></svg>
     </button>
+  </div>
+
+  <div id="pick-banner" class="toast pick-banner" role="status" hidden>
+    <span id="pick-text"></span>
+    <button id="pick-cancel" class="btn btn-small" type="button">Cancel</button>
   </div>
 
   <div id="loader" class="loader">

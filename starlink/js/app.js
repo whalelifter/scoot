@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { createEarth, createStarfield } from './earth.js';
 import { loadElements, formatAge, REFRESH_INTERVAL_MS, SOURCE_LABELS } from './data.js';
 import {
-  GROUPS, MU_SCENE, classify, gmst, sunDirectionEci, surfaceVector,
+  GROUPS, MU_SCENE, classifyAll, gmst, sunDirectionEci, surfaceVector,
 } from './astro.js';
 
 const $ = (id) => document.getElementById(id);
@@ -276,10 +276,9 @@ const clock = {
 };
 
 // ---------------------------------------------------------------------------------------------
-// Worker
+// Orbit calculator: a web worker, or the page itself if the browser won't start one
 // ---------------------------------------------------------------------------------------------
 
-const worker = new Worker(new URL('./propagator.worker.js', import.meta.url), { type: 'module' });
 let workerReady = false;
 let tickInFlight = false;
 let lastTickPerf = -Infinity;
@@ -287,13 +286,58 @@ let forceTick = false;
 let dataset = null; // {fetchedAt, source, stale}
 let firstState = true;
 let pendingSelectNorad = readHashNorad();
+let lastInitMsg = null; // re-sent if we have to fall back to the page
+let lastObserverMsg = null;
+let usingPageFallback = false;
+let propagator = startWorker();
+if (!propagator) fallBackToPage();
 
-worker.onerror = (event) => {
-  console.error(event);
-  showFatal("The orbit calculator failed to start. Check your connection (it loads from cdn.jsdelivr.net) and reload.");
-};
+function startWorker() {
+  try {
+    // A single-file build embeds the worker's code in the page instead of shipping it as a file.
+    const inline = document.getElementById('propagator-source');
+    const url = inline
+      ? URL.createObjectURL(new Blob([inline.textContent], { type: 'text/javascript' }))
+      : new URL('./propagator.worker.js', import.meta.url);
+    const w = new Worker(url, { type: 'module' });
+    w.onmessage = ({ data }) => onPropagatorMessage(data);
+    w.onerror = (event) => {
+      console.warn('Orbit worker failed; computing on the page instead.', event.message || event);
+      w.terminate();
+      fallBackToPage();
+    };
+    return w;
+  } catch (err) {
+    console.warn('Orbit worker unavailable; computing on the page instead.', err);
+    return null;
+  }
+}
 
-worker.onmessage = ({ data: msg }) => {
+async function fallBackToPage() {
+  if (usingPageFallback) return;
+  usingPageFallback = true;
+  propagator = null;
+  tickInFlight = false;
+  trackInFlight = false;
+  try {
+    const { createPropagator } = await import('./propagator.js');
+    const local = createPropagator((msg) => onPropagatorMessage(msg));
+    propagator = { postMessage: (msg) => setTimeout(() => local.handle(msg), 0) };
+    if (lastInitMsg) propagator.postMessage(lastInitMsg);
+    if (lastObserverMsg) propagator.postMessage(lastObserverMsg);
+  } catch (err) {
+    console.error(err);
+    showFatal("The orbit calculator couldn't load. Check your connection (it loads from cdn.jsdelivr.net) and reload.");
+  }
+}
+
+function send(msg) {
+  if (msg.type === 'init') lastInitMsg = msg;
+  if (msg.type === 'observer') lastObserverMsg = msg;
+  propagator?.postMessage(msg);
+}
+
+function onPropagatorMessage(msg) {
   if (msg.type === 'ready') onWorkerReady(msg);
   else if (msg.type === 'state') onState(msg);
   else if (msg.type === 'track') onTrack(msg);
@@ -303,18 +347,12 @@ worker.onmessage = ({ data: msg }) => {
     if (msg.request === 'track') trackInFlight = false;
     if (msg.request === 'init') showFatal(`Couldn't read the orbital elements: ${msg.message}`);
   }
-};
+}
 
 function onWorkerReady(msg) {
   const previousNorad = selected >= 0 && meta ? meta.norad[selected] : null;
-  const group = new Uint8Array(msg.count);
-  const shell = new Array(msg.count);
-  for (let i = 0; i < msg.count; i++) {
-    const c = classify(msg.inclination[i], msg.meanAltitude[i]);
-    group[i] = c.group;
-    shell[i] = c.shell;
-  }
-  meta = { ...msg, group, shell, searchNames: msg.names.map((s) => s.toUpperCase()) };
+  const { group, shell, shells } = classifyAll(msg.inclination, msg.meanAltitude);
+  meta = { ...msg, group, shell, shells, searchNames: msg.names.map((s) => s.toUpperCase()) };
   state = null;
   workerReady = true;
   tickInFlight = false;
@@ -336,7 +374,7 @@ function onWorkerReady(msg) {
     if (previousNorad != null) deselect();
     toast(`Satellite ${norad} isn't in the current Starlink data.`);
   } else if (firstState) {
-    selected = idx; // opened with #sat=…: selected and flown to once positions arrive
+    selected = idx; // opened with #sat-…: selected and flown to once positions arrive
   } else {
     select(idx, { fly: false });
   }
@@ -399,7 +437,7 @@ function maybeTick(perfNow, simNow) {
   forceTick = false;
   tickInFlight = true;
   lastTickPerf = perfNow;
-  worker.postMessage({ type: 'tick', time: simNow, selected });
+  send({ type: 'tick', time: simNow, selected });
 }
 
 function maybeTrack(perfNow, simNow) {
@@ -407,7 +445,7 @@ function maybeTrack(perfNow, simNow) {
   if (Math.abs(simNow - trackTime) < TRACK_REFRESH_SIM_MS || perfNow - lastTrackPerf < 250) return;
   trackInFlight = true;
   lastTrackPerf = perfNow;
-  worker.postMessage({ type: 'track', index: selected, time: simNow });
+  send({ type: 'track', index: selected, time: simNow });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -424,8 +462,11 @@ async function loadData({ initial = false } = {}) {
     }
     dataset = { fetchedAt: result.fetchedAt, source: result.source, stale: result.stale };
     if (result.warning) toast(result.warning);
+    else if (initial && Date.now() - result.fetchedAt > OLD_DATA_MS) {
+      toast(`These orbital elements are ${formatAge(Date.now() - result.fetchedAt)} old, so positions are approximate.`);
+    }
     if (initial) setLoader(`Computing orbits for ${fmtInt.format(result.rows.length)} satellites…`);
-    worker.postMessage({ type: 'init', rows: result.rows });
+    send({ type: 'init', rows: result.rows });
     updateDataAge();
   } catch (err) {
     console.error(err);
@@ -454,11 +495,17 @@ function updateStats(stats) {
   $('stat-alt').textContent = Number.isFinite(stats.meanAltitude) ? `${fmtInt.format(Math.round(stats.meanAltitude))} km` : '—';
 }
 
+const OLD_DATA_MS = 6 * 60 * 60 * 1000;
+
 function updateDataAge() {
   if (!dataset) return;
   const label = SOURCE_LABELS[dataset.source] || dataset.source;
-  $('stat-data').textContent = `${formatAge(Date.now() - dataset.fetchedAt)} ago`;
+  const age = Date.now() - dataset.fetchedAt;
+  $('stat-data').textContent = `${formatAge(age)} ago`;
   $('stat-data').title = `Source: ${label}${dataset.stale ? ' (could not refresh)' : ''}`;
+  const note = $('data-note');
+  note.hidden = age < OLD_DATA_MS;
+  note.textContent = `These orbital elements are ${formatAge(age)} old. Positions drift further from reality as they age.`;
 }
 
 const legendButtons = [];
@@ -487,7 +534,7 @@ function buildLegend() {
     count.textContent = '—';
     const detail = document.createElement('span');
     detail.className = 'legend-detail';
-    detail.textContent = g.detail;
+    detail.textContent = legendDetail(gi);
     btn.append(swatch, label, count, detail);
     btn.addEventListener('click', () => {
       groupVisible[gi] = !groupVisible[gi];
@@ -500,6 +547,16 @@ function buildLegend() {
     legendButtons.push(btn);
     legendCounts.push(count);
   });
+}
+
+/** Legend sub-line: the shell altitudes found in the data, where that's the useful detail. */
+function legendDetail(gi) {
+  const altitudes = (meta?.shells || []).filter((s) => s.group === gi).map((s) => `~${s.altitude}`);
+  if ((gi === 0 || gi === 1) && altitudes.length) {
+    const list = altitudes.length > 1 ? `${altitudes.slice(0, -1).join(', ')} and ${altitudes.at(-1)}` : altitudes[0];
+    return `Shells at ${list} km`;
+  }
+  return GROUPS[gi].detail;
 }
 
 function updateLegendCounts() {
@@ -568,7 +625,7 @@ function select(i, { fly = true } = {}) {
     refreshVisibility();
   }
   if (fly && state && state.ok[i]) startFlight(i);
-  history.replaceState(null, '', `#sat=${meta.norad[i]}`);
+  history.replaceState(null, '', `#sat-${meta.norad[i]}`);
 }
 
 function deselect() {
@@ -590,7 +647,7 @@ function setFollowing(on) {
 }
 
 function readHashNorad() {
-  const m = /sat=(\d+)/.exec(location.hash);
+  const m = /sat[-=](\d+)/.exec(location.hash); // #sat-44714 (and the older #sat=44714)
   return m ? Number(m[1]) : null;
 }
 
@@ -764,6 +821,14 @@ canvas.addEventListener('pointerup', (e) => {
   const quick = performance.now() - down.t < 600;
   down = null;
   if (moved > 6 || !quick || e.button > 0) return;
+  if (picking) {
+    const spot = earthPointAt(e.clientX, e.clientY);
+    if (spot) {
+      stopPicking();
+      setObserver(spot.lat, spot.lon, 0);
+    }
+    return;
+  }
   // With a mouse, click whatever the tooltip is showing; with touch, pick under the finger.
   const idx = e.pointerType === 'mouse' && hovered >= 0 ? hovered : pick(e.clientX, e.clientY, e.pointerType === 'touch' ? 24 : 12);
   if (idx >= 0) select(idx);
@@ -781,6 +846,7 @@ function setHover(i) {
 }
 
 function updateHover(simTime) {
+  if (picking) return;
   if (pointer.inside && pointer.type === 'mouse' && !down && state) {
     // Re-pick every frame while the mouse is over the globe: satellites move under a still cursor.
     setHover(pick(pointer.x, pointer.y, 10));
@@ -903,6 +969,8 @@ window.addEventListener('keydown', (e) => {
   if (e.key === '/' && !typing) {
     e.preventDefault();
     searchInput.focus();
+  } else if (e.key === 'Escape' && !typing && picking) {
+    stopPicking();
   } else if (e.key === 'Escape' && !typing && selected >= 0) {
     deselect();
   }
@@ -960,7 +1028,7 @@ function updateClock(simTime) {
 $('btn-locate').addEventListener('click', () => {
   if (observer) {
     observer = null;
-    worker.postMessage({ type: 'observer', observer: null });
+    send({ type: 'observer', observer: null });
     observerMarker.visible = false;
     beams.visible = false;
     $('observer-stats').hidden = true;
@@ -969,8 +1037,12 @@ $('btn-locate').addEventListener('click', () => {
     $('info-look-row').hidden = true;
     return;
   }
+  if (picking) {
+    stopPicking();
+    return;
+  }
   if (!('geolocation' in navigator)) {
-    toast('This browser cannot share your location.');
+    startPicking("This browser can't share your location.");
     return;
   }
   $('btn-locate-label').textContent = 'Locating…';
@@ -982,18 +1054,49 @@ $('btn-locate').addEventListener('click', () => {
     },
     (err) => {
       $('btn-locate-label').textContent = 'Satellites above me';
-      toast(err.code === err.PERMISSION_DENIED
-        ? 'Location permission was declined, so the overhead view is unavailable.'
-        : "Couldn't get your location. Try again in a moment.");
+      startPicking(err.code === err.PERMISSION_DENIED ? "Location access isn't available here." : "Couldn't get your location.");
     },
     { enableHighAccuracy: false, timeout: 15000, maximumAge: 10 * 60 * 1000 },
   );
 });
 
+// Without location access, the viewer taps the globe to say where they are.
+let picking = false;
+const raycaster = new THREE.Raycaster();
+const earthSphere = new THREE.Sphere(new THREE.Vector3(), 1);
+
+function startPicking(reason) {
+  picking = true;
+  setHover(-1);
+  $('pick-text').textContent = `${reason} Tap the globe where you are.`;
+  $('pick-banner').hidden = false;
+  canvas.classList.add('picking');
+}
+
+function stopPicking() {
+  picking = false;
+  $('pick-banner').hidden = true;
+  canvas.classList.remove('picking');
+}
+$('pick-cancel').addEventListener('click', stopPicking);
+
+/** Latitude/longitude under a screen point, or null if the point misses the Earth. */
+function earthPointAt(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  const hit = raycaster.ray.intersectSphere(earthSphere, new THREE.Vector3());
+  if (!hit) return null;
+  return {
+    lat: THREE.MathUtils.radToDeg(Math.asin(THREE.MathUtils.clamp(hit.y, -1, 1))),
+    lon: THREE.MathUtils.radToDeg(Math.atan2(-hit.z, hit.x)),
+  };
+}
+
 function setObserver(lat, lon, heightKm) {
   const [x, y, z] = surfaceVector(lat, lon, 1.0);
   observer = { lat, lon, world: new THREE.Vector3(x, y, z) };
-  worker.postMessage({ type: 'observer', observer: { lat, lon, heightKm } });
+  send({ type: 'observer', observer: { lat, lon, heightKm } });
   observerMarker.position.copy(observer.world).multiplyScalar(1.002);
   observerMarker.visible = true;
   $('btn-locate-label').textContent = 'Clear my location';

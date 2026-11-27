@@ -10,8 +10,12 @@
 // JSON is used rather than TLE because new objects (catalog numbers above 99999) only exist in OMM.
 
 const CELESTRAK_URL = 'https://celestrak.org/NORAD/elements/gp.php?GROUP=starlink&FORMAT=json';
-const SNAPSHOT_URL = new URL('../data/starlink.json', import.meta.url);
-const SNAPSHOT_META_URL = new URL('../data/meta.json', import.meta.url);
+// Relative to the page, so the same code works on the site and in a single-file bundle.
+const SNAPSHOT_URL = new URL('data/starlink.json', document.baseURI);
+const SNAPSHOT_META_URL = new URL('data/meta.json', document.baseURI);
+// A page with <meta name="starlink-data" content="snapshot-only"> (for hosts that block requests to
+// other sites) uses only the snapshot published with it and never contacts CelesTrak.
+const SNAPSHOT_ONLY = document.querySelector('meta[name="starlink-data"]')?.content === 'snapshot-only';
 const CACHE_KEY = 'starlink-tracker:gp:v1';
 const BACKOFF_KEY = 'starlink-tracker:celestrak-backoff';
 
@@ -37,6 +41,12 @@ export const SOURCE_LABELS = {
  *   `null` means nothing newer is available and the data in `have` is still good to use.
  */
 export async function loadElements({ have = null } = {}) {
+  if (SNAPSHOT_ONLY) {
+    const snapshot = await findSnapshot(have?.fetchedAt || 0);
+    if (snapshot) return { ...snapshot, rows: await snapshot.download(), stale: false };
+    if (have) return null;
+    throw new Error('the orbital data published with this page is missing');
+  }
   const now = Date.now();
   const cached = readCache();
   const age = (d) => now - d.fetchedAt;

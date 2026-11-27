@@ -2,7 +2,7 @@
 // direction, an atmosphere rim and a starfield.
 import * as THREE from 'three';
 
-const LAND_URL = new URL('../assets/land-50m.json', import.meta.url);
+const LAND_URL = new URL('assets/land-50m.json', document.baseURI); // relative to the page
 
 const OCEAN = '#0a1628';
 const LAND = '#1f3550';
