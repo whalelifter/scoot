@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Starlink Live Tracker</title>
+  <meta name="description" content="Every Starlink satellite in orbit on a 3D globe, positioned in real time from the latest public orbital elements.">
+  <meta name="theme-color" content="#03050b">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='9' fill='%230a1628' stroke='%23338ced' stroke-width='2'/%3E%3Cellipse cx='16' cy='16' rx='15' ry='5' fill='none' stroke='%2300a888' stroke-width='1.6' transform='rotate(-25 16 16)'/%3E%3Ccircle cx='28' cy='11' r='2.4' fill='%23e6ecf5'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="styles.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.min.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <canvas id="globe" aria-label="3D globe showing Starlink satellites in orbit" role="img"></canvas>
+
+  <div class="hud">
+    <div class="col-left">
+      <header class="panel brand">
+        <div class="brand-row">
+          <h1>Starlink Live</h1>
+          <span id="mode-badge" class="badge badge-live"><span class="dot" aria-hidden="true"></span><span id="mode-label">Live</span></span>
+        </div>
+        <p class="sub">Every Starlink satellite in orbit, positioned in real time from the latest public orbital elements.</p>
+      </header>
+
+      <section class="panel stats" aria-label="Constellation statistics">
+        <div class="hero">
+          <span id="stat-count" class="hero-num">—</span>
+          <span class="hero-label">satellites<span class="wide-only"> tracked</span></span>
+        </div>
+        <dl class="kv">
+          <div><dt>In sunlight</dt><dd id="stat-sunlit">—</dd></div>
+          <div><dt>In Earth's shadow</dt><dd id="stat-shadow">—</dd></div>
+          <div><dt>Mean altitude</dt><dd id="stat-alt">—</dd></div>
+          <div><dt>Elements updated</dt><dd id="stat-data">—</dd></div>
+        </dl>
+        <p id="data-note" class="data-note" hidden></p>
+      </section>
+
+      <section class="panel legend" aria-labelledby="legend-title">
+        <h2 id="legend-title">Orbital shells</h2>
+        <ul id="legend-list" class="legend-list"></ul>
+        <p class="hint">Click a shell to show or hide it. Dimmed dots are in Earth's shadow.</p>
+      </section>
+    </div>
+
+    <div class="col-right">
+      <div class="panel search" role="search">
+        <label for="search" class="visually-hidden">Find a satellite</label>
+        <svg class="search-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="M13 13l4 4"/></svg>
+        <input id="search" type="search" placeholder="Search name or NORAD ID" autocomplete="off" spellcheck="false"
+               role="combobox" aria-expanded="false" aria-controls="search-results" aria-autocomplete="list" disabled>
+        <kbd class="search-kbd" aria-hidden="true">/</kbd>
+        <ul id="search-results" class="search-results" role="listbox" aria-label="Matching satellites" hidden></ul>
+      </div>
+
+      <aside id="info" class="panel info" aria-labelledby="info-name" hidden>
+        <div class="info-head">
+          <div>
+            <h2 id="info-name">—</h2>
+            <p id="info-sub" class="muted">—</p>
+          </div>
+          <button id="info-close" class="icon-btn" type="button" aria-label="Close satellite details">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15"/></svg>
+          </button>
+        </div>
+        <p class="info-shell"><span id="info-swatch" class="swatch" aria-hidden="true"></span><span id="info-shell">—</span></p>
+        <dl class="kv">
+          <div><dt>Latitude</dt><dd id="info-lat">—</dd></div>
+          <div><dt>Longitude</dt><dd id="info-lon">—</dd></div>
+          <div><dt>Altitude</dt><dd id="info-alt">—</dd></div>
+          <div><dt>Speed</dt><dd id="info-speed">—</dd></div>
+          <div><dt>Orbital period</dt><dd id="info-period">—</dd></div>
+          <div><dt>Lighting</dt><dd id="info-light">—</dd></div>
+          <div><dt>Elements epoch</dt><dd id="info-epoch">—</dd></div>
+          <div id="info-look-row" hidden><dt>From you</dt><dd id="info-look">—</dd></div>
+        </dl>
+        <div class="info-actions">
+          <button id="info-follow" class="btn" type="button" aria-pressed="false">Follow</button>
+          <span class="muted small line-keys"><span class="line-key" aria-hidden="true"></span>Next orbit<span id="key-ground" class="line-key" aria-hidden="true"></span>Ground track</span>
+        </div>
+      </aside>
+    </div>
+
+    <div class="bottom">
+      <div class="panel observer">
+        <button id="btn-locate" class="btn" type="button" disabled>
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 18s6-5.2 6-10a6 6 0 10-12 0c0 4.8 6 10 6 10z"/><circle cx="10" cy="8" r="2.2"/></svg>
+          <span id="btn-locate-label" class="locate-label">Satellites above me</span>
+        </button>
+        <div id="observer-stats" class="observer-stats" hidden>
+          <div><span id="obs-dish" class="obs-num">—</span><span class="muted">in dish range (≥25°)</span></div>
+          <div><span id="obs-horizon" class="obs-num">—</span><span class="muted">above horizon</span></div>
+          <button id="obs-highest" class="link-btn" type="button" hidden></button>
+        </div>
+      </div>
+
+      <div class="panel timebar" role="group" aria-label="Time controls">
+        <button id="btn-pause" class="icon-btn" type="button" aria-label="Pause">
+          <svg class="i-pause" viewBox="0 0 20 20" aria-hidden="true"><path d="M7 4v12M13 4v12"/></svg>
+          <svg class="i-play" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4l10 6-10 6z"/></svg>
+        </button>
+        <div class="speeds" role="radiogroup" aria-label="Playback speed">
+          <button type="button" role="radio" data-rate="1" aria-checked="true">1×</button>
+          <button type="button" role="radio" data-rate="10" aria-checked="false">10×</button>
+          <button type="button" role="radio" data-rate="60" aria-checked="false">60×</button>
+          <button type="button" role="radio" data-rate="300" aria-checked="false">300×</button>
+        </div>
+        <time id="sim-time" class="sim-time"><span id="sim-date" class="sim-date"></span> <span id="sim-clock">—</span></time>
+        <button id="btn-live" class="btn btn-small" type="button" hidden>Back to live</button>
+      </div>
+
+      <p class="credits">
+        Orbits: <a href="https://celestrak.org/" target="_blank" rel="noopener">CelesTrak</a> GP data,
+        SGP4 by <a href="https://github.com/shashwatak/satellite-js" target="_blank" rel="noopener">satellite.js</a> ·
+        Coastlines: <a href="https://www.naturalearthdata.com/" target="_blank" rel="noopener">Natural Earth</a>
+      </p>
+    </div>
+  </div>
+
+  <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden>
+    <span id="toast-text"></span>
+    <button id="toast-close" class="icon-btn" type="button" aria-label="Dismiss">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15"/></svg>
+    </button>
+  </div>
+
+  <div id="pick-banner" class="toast pick-banner" role="status" hidden>
+    <span id="pick-text"></span>
+    <button id="pick-cancel" class="btn btn-small" type="button">Cancel</button>
+  </div>
+
+  <div id="loader" class="loader">
+    <div class="loader-card">
+      <div class="spinner" aria-hidden="true"></div>
+      <p id="loader-msg">Loading orbital elements…</p>
+      <button id="loader-retry" class="btn" type="button" hidden>Try again</button>
+    </div>
+  </div>
+
+  <noscript><p class="noscript">This tracker needs JavaScript and WebGL.</p></noscript>
+</body>
+</html>
