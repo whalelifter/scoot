@@ -31,7 +31,6 @@ try {
   throw err;
 }
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-renderer.setClearColor(0x03050b, 1);
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(42, 1, 0.01, 500);
@@ -57,7 +56,8 @@ scene.add(earth.group);
 // frame keeps the Earth itself fixed in the scene, so the camera stays over the same region.
 const inertial = new THREE.Group();
 scene.add(inertial);
-inertial.add(createStarfield());
+const starfield = createStarfield();
+inertial.add(starfield);
 
 // ---------------------------------------------------------------------------------------------
 // Satellites: one point per satellite. Positions come from SGP4 a couple of times a second and
@@ -70,6 +70,7 @@ const satUniforms = {
   uSize: { value: 3.0 },
   uPixelRatio: { value: renderer.getPixelRatio() },
   uMu: { value: MU_SCENE },
+  uLight: { value: 0 }, // 1 on the light theme
 };
 
 const satMaterial = new THREE.ShaderMaterial({
@@ -104,6 +105,7 @@ const satMaterial = new THREE.ShaderMaterial({
       gl_PointSize = aVisible * uSize * uPixelRatio * attenuation;
     }`,
   fragmentShader: /* glsl */ `
+    uniform float uLight;
     varying vec3 vColor;
     varying float vLit;
     void main() {
@@ -111,13 +113,20 @@ const satMaterial = new THREE.ShaderMaterial({
       float d2 = dot(c, c);
       if (d2 > 0.25) discard;
       float edge = 1.0 - smoothstep(0.12, 0.25, d2);
-      vec3 shadow = vColor * 0.38 + vec3(0.03, 0.04, 0.06);
-      vec3 lit = min(vColor * 1.12 + 0.10, vec3(1.0));
+      // Dark theme: sunlit dots glow, shadowed ones sink toward the night sky.
+      vec3 darkShadow = vColor * 0.38 + vec3(0.03, 0.04, 0.06);
+      vec3 darkLit = min(vColor * 1.12 + 0.10, vec3(1.0));
+      // Light theme: sunlit dots keep their full colour, shadowed ones fade toward grey.
+      vec3 lightShadow = mix(vColor, vec3(0.56, 0.61, 0.69), 0.6);
+      vec3 shadow = mix(darkShadow, lightShadow, uLight);
+      vec3 lit = mix(darkLit, vColor, uLight);
       gl_FragColor = vec4(mix(shadow, lit, vLit), edge * mix(0.6, 1.0, vLit));
     }`,
 });
 
 let satPoints = null;
+/** Current theme: its name and the four group colours (hex and 0–1 RGB). Set by applyTheme(). */
+const theme = { name: 'dark', hex: GROUPS.map((g) => g.color), palette: GROUPS.map((g) => hexToRgb(g.color)) };
 
 /** Static facts about each satellite, from the worker's `ready` message. */
 let meta = null;
@@ -136,8 +145,7 @@ function buildSatellites() {
   geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
   geometry.setAttribute('aVelocity', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
   const colors = new Float32Array(n * 3);
-  const palette = GROUPS.map((g) => hexToRgb(g.color));
-  for (let i = 0; i < n; i++) colors.set(palette[meta.group[i]], i * 3);
+  for (let i = 0; i < n; i++) colors.set(theme.palette[meta.group[i]], i * 3);
   geometry.setAttribute('aColor', new THREE.BufferAttribute(colors, 3));
   geometry.setAttribute('aVisible', new THREE.BufferAttribute(new Float32Array(n), 1));
   geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 50);
@@ -417,7 +425,7 @@ function onTrack(msg) {
   if (msg.index !== selected || !msg.points) return;
   setLine(orbitLine, msg.orbit, msg.points);
   setLine(groundLine, msg.ground, msg.points);
-  groundLine.material.color.set(GROUPS[meta.group[selected]].color);
+  groundLine.material.color.set(theme.hex[meta.group[selected]]);
   orbitLine.visible = true;
   groundLine.visible = true;
   trackTime = msg.time;
@@ -525,7 +533,7 @@ function buildLegend() {
     btn.title = `Show or hide ${g.label}`;
     const swatch = document.createElement('span');
     swatch.className = 'swatch';
-    swatch.style.setProperty('--c', g.color);
+    swatch.style.setProperty('--c', `var(--g${gi})`);
     const label = document.createElement('span');
     label.className = 'legend-label';
     label.textContent = g.label;
@@ -592,7 +600,8 @@ function fillInfoStatic(i) {
   const cospar = meta.cospar[i];
   $('info-sub').textContent = `NORAD ${meta.norad[i]}${cospar ? ` · ${cospar}` : ''}${launchText(cospar)}`;
   $('info-shell').textContent = `${meta.shell[i]} · ${fmt1.format(meta.inclination[i])}° inclination`;
-  $('info-swatch').style.setProperty('--c', GROUPS[meta.group[i]].color);
+  $('info-swatch').style.setProperty('--c', `var(--g${meta.group[i]})`);
+  $('key-ground').style.setProperty('--c', `var(--g${meta.group[i]})`);
   $('info-period').textContent = Number.isFinite(meta.periodMin[i]) ? `${fmt1.format(meta.periodMin[i])} min` : '—';
   for (const id of ['info-lat', 'info-lon', 'info-alt', 'info-speed', 'info-light', 'info-epoch']) $(id).textContent = '…';
   $('info').hidden = false;
@@ -917,7 +926,7 @@ function renderResults() {
     li.setAttribute('aria-selected', String(k === activeResult));
     const swatch = document.createElement('span');
     swatch.className = 'swatch';
-    swatch.style.setProperty('--c', GROUPS[meta.group[idx]].color);
+    swatch.style.setProperty('--c', `var(--g${meta.group[idx]})`);
     const name = document.createElement('span');
     name.className = 'r-name';
     name.textContent = meta.names[idx];
@@ -1194,6 +1203,46 @@ function toast(message) {
   toastTimer = setTimeout(() => ($('toast').hidden = true), 9000);
 }
 $('toast-close').addEventListener('click', () => ($('toast').hidden = true));
+
+// ---------------------------------------------------------------------------------------------
+// Theme: follows the viewer's light/dark setting. The colours live in styles.css; the scene reads
+// them from CSS variables so there is one source of truth.
+// ---------------------------------------------------------------------------------------------
+
+const SCENE_STYLE = {
+  dark: { ring: 0xffffff, orbit: 0xffffff, orbitOpacity: 0.55, beam: 0x9fe8ff, beamOpacity: 0.35 },
+  light: { ring: 0x10223d, orbit: 0x1d3557, orbitOpacity: 0.6, beam: 0x1b64be, beamOpacity: 0.45 },
+};
+
+function applyTheme() {
+  const css = getComputedStyle(document.documentElement);
+  const name = css.getPropertyValue('--scene').trim() === 'light' ? 'light' : 'dark';
+  theme.name = name;
+  theme.hex = GROUPS.map((g, gi) => css.getPropertyValue(`--g${gi}`).trim() || g.color);
+  theme.palette = theme.hex.map(hexToRgb);
+  const style = SCENE_STYLE[name];
+  renderer.setClearColor(css.getPropertyValue('--scene-bg').trim() || '#03050b', 1);
+  earth.setTheme(name);
+  starfield.visible = name === 'dark';
+  satUniforms.uLight.value = name === 'light' ? 1 : 0;
+  selectMarker.material.color.setHex(style.ring);
+  hoverMarker.material.color.setHex(style.ring);
+  orbitLine.material.color.setHex(style.orbit);
+  orbitLine.material.opacity = style.orbitOpacity;
+  beams.material.color.setHex(style.beam);
+  beams.material.opacity = style.beamOpacity;
+  if (selected >= 0 && meta) groundLine.material.color.set(theme.hex[meta.group[selected]]);
+  if (satPoints && meta) {
+    const attr = satPoints.geometry.getAttribute('aColor');
+    for (let i = 0; i < meta.count; i++) attr.array.set(theme.palette[meta.group[i]], i * 3);
+    attr.needsUpdate = true;
+  }
+}
+
+applyTheme();
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
+// The host page can also switch themes by setting data-theme on the root element.
+new MutationObserver(applyTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
 // ---------------------------------------------------------------------------------------------
 // Main loop
