@@ -1,0 +1,101 @@
+name: Deploy Starlink tracker to GitHub Pages
+
+# Publishes the repository (the tracker lives at /starlink/) and, alongside it, a snapshot of the
+# latest Starlink orbital elements from CelesTrak. Visitors' browsers read that snapshot instead of
+# calling CelesTrak themselves, which keeps them clear of CelesTrak's one-download-per-2-hours limit.
+#
+# Does nothing until Settings → Pages → "Build and deployment" → Source is set to "GitHub Actions".
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # CelesTrak publishes new elements every 2 hours; refresh the snapshot on the same cadence.
+    - cron: '23 */2 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      pages: read
+    outputs:
+      enabled: ${{ steps.pages.outputs.enabled }}
+    steps:
+      - name: Check that Pages deploys from GitHub Actions
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          build_type=$(gh api "repos/${GITHUB_REPOSITORY}/pages" --jq .build_type 2>/dev/null || true)
+          if [ "$build_type" = "workflow" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::GitHub Pages isn't set to deploy from GitHub Actions (Settings → Pages → Source), so nothing was deployed."
+          fi
+
+  deploy:
+    needs: check
+    if: needs.check.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}starlink/
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Snapshot Starlink orbital elements from CelesTrak
+        id: snapshot
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --max-time 120 \
+            --user-agent "starlink-tracker-pages-workflow" \
+            --output starlink/data/starlink.json \
+            "https://celestrak.org/NORAD/elements/gp.php?GROUP=starlink&FORMAT=json"
+          count=$(jq 'length' starlink/data/starlink.json)
+          if [ "$count" -lt 1000 ]; then
+            echo "Only $count records came back; not publishing them." >&2
+            exit 1
+          fi
+          jq -n --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson n "$count" \
+            '{fetched_at: $t, count: $n, source: "CelesTrak GP data, GROUP=starlink"}' \
+            > starlink/data/meta.json
+          echo "Snapshot holds $count satellites."
+
+      - name: Handle a failed snapshot
+        if: steps.snapshot.outcome == 'failure'
+        run: |
+          rm -f starlink/data/starlink.json
+          git checkout -- starlink/data/meta.json
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            # Keep the previous deployment (and its snapshot) rather than publishing one without data.
+            echo "SKIP_DEPLOY=true" >> "$GITHUB_ENV"
+            echo "::warning::Couldn't snapshot CelesTrak data; keeping the current deployment."
+          else
+            echo "::warning::Couldn't snapshot CelesTrak data; the site will fetch it from visitors' browsers."
+          fi
+
+      - uses: actions/configure-pages@v5
+        if: env.SKIP_DEPLOY != 'true'
+
+      - uses: actions/upload-pages-artifact@v3
+        if: env.SKIP_DEPLOY != 'true'
+        with:
+          path: .
+
+      - name: Deploy
+        id: deployment
+        if: env.SKIP_DEPLOY != 'true'
+        uses: actions/deploy-pages@v4
